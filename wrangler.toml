@@ -8,7 +8,7 @@ ENVIRONMENT = "production"
 [[d1_databases]]
 binding = "DB"
 database_name = "planetary-max-db"
-database_id = "32963938-8b9a-490d-a6e6-bffb03eb6eec"
+database_id = "42213e2a-9607-4b46-9744-07d1420e0a60"
 
 [assets]
 directory = "./dist"
