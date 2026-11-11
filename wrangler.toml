@@ -1,4 +1,4 @@
-name = "planetary-max"
+name = "planetary-max1"
 main = "server/planetary-max.ts"
 compatibility_date = "2026-11-10"
 
