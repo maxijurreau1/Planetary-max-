@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "npm run build && wrangler deploy",
-    "build": "esbuild src/index.tsx --bundle --outfile=dist/index.js --loader:.tsx=tsx --format=esm --minify"
+    "build": "mkdir -p dist && esbuild src/index.tsx --bundle --outfile=dist/index.js --loader:.tsx=tsx --format=esm --minify && cp src/index.html dist/index.html"
   },
   "dependencies": {
     "hono": "^4.6.0",
