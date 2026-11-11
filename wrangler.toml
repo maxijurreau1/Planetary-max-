@@ -1,0 +1,15 @@
+name = "planetary-max"
+main = "server/planetary-max.ts"
+compatibility_date = "2026-11-10"
+
+[vars]
+ENVIRONMENT = "production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "planetary-max-db"
+database_id = "32963938-8b9a-490d-a6e6-bffb03eb6eec"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
