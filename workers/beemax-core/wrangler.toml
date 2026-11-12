@@ -5,6 +5,11 @@ compatibility_date = "2026-11-12"
 [vars]
 DEFAULT_NODE_ID = "node-default"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "beemax-production-db"
+database_id = "5a8e3def-a8ef-4fda-907f-20bc5f24a501"
+
 [[durable_objects.bindings]]
 name = "NODE_REGISTRY"
 class_name = "NodeRegistryDO"
