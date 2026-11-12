@@ -7,8 +7,8 @@ ENVIRONMENT = "production"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "planetary-max-db"
-database_id = "32963938-8b9a-490d-a6e6-bffb03eb6eec"
+database_name = "beemax-production-db"
+database_id = "5a8e3def-a8ef-4fda-907f-20bc5f24a501"
 
 [assets]
 directory = "./dist"
