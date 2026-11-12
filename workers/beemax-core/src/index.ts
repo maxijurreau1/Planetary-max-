@@ -10,6 +10,8 @@ interface Env {
   DB?: D1Database;
   SESSION_KV?: KVNamespace;
   JWT_SECRET?: string;
+  JWT_ISSUER?: string;
+  JWT_AUDIENCE?: string;
   OPERATOR_ADMIN_TOKEN?: string;
   REGISTRY_INTERNAL_TOKEN?: string;
   ALLOWED_ORIGIN?: string;
@@ -57,7 +59,7 @@ function secureRegistryStub(request: Request, env: Env): Promise<Response> {
   if (!env.BEEMAX_SECURE_REGISTRY) {
     return Promise.resolve(Response.json({ error: 'Secure WebSocket registry is not configured' }, { status: 503 }));
   }
-  if (!env.DB || !env.SESSION_KV || !env.JWT_SECRET) {
+  if (!env.DB || !env.SESSION_KV || !env.JWT_SECRET || !env.JWT_ISSUER || !env.JWT_AUDIENCE) {
     return Promise.resolve(Response.json({ error: 'Secure session authentication is not configured' }, { status: 503 }));
   }
   const id = env.BEEMAX_SECURE_REGISTRY.idFromName('global-secure-registry');
@@ -67,7 +69,6 @@ function secureRegistryStub(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-
     if (url.pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });
 
     if (url.pathname === '/api/beemax/session' && request.method === 'POST') {

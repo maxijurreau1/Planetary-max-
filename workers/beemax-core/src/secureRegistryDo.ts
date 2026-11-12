@@ -35,6 +35,8 @@ interface SecureEnv {
   DB: D1Database;
   SESSION_KV: KVNamespace;
   JWT_SECRET: string;
+  JWT_ISSUER: string;
+  JWT_AUDIENCE: string;
 }
 
 interface SocketAttachment {
@@ -60,39 +62,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export class BEEMAXSecureNodeRegistryDO {
-  constructor(
-    private readonly state: SecureState,
-    private readonly env: SecureEnv,
-  ) {
+  constructor(private readonly state: SecureState, private readonly env: SecureEnv) {
     void this.state.blockConcurrencyWhile(async () => {
-      if (!(await this.state.storage.getAlarm())) {
-        await this.state.storage.setAlarm(Date.now() + 60_000);
-      }
+      if (!(await this.state.storage.getAlarm())) await this.state.storage.setAlarm(Date.now() + 60_000);
     });
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-
-    if (url.pathname === '/api/beemax/session' && request.method === 'POST') {
-      return this.issueUpgradeTicket(request);
-    }
-
+    if (url.pathname === '/api/beemax/session' && request.method === 'POST') return this.issueUpgradeTicket(request);
     if (url.pathname === '/ws') {
       if (request.method !== 'GET' || request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
         return new Response('Expected WebSocket upgrade', { status: 426 });
       }
       return this.upgradeWebSocket(request);
     }
-
     return json({ error: 'Not found' }, 404);
   }
 
   private async issueUpgradeTicket(request: Request): Promise<Response> {
     const userAuth = await verifyRealUserSession(request, this.env);
-    if (!userAuth.authorized || !userAuth.userId) {
-      return json({ error: 'Unauthorized: valid user session required' }, 401);
-    }
+    if (!userAuth.authorized || !userAuth.userId) return json({ error: 'Unauthorized: valid user session required' }, 401);
 
     let body: unknown;
     try {
@@ -106,9 +96,7 @@ export class BEEMAXSecureNodeRegistryDO {
     }
 
     const nodeId = isRecord(body) ? body.nodeId : undefined;
-    if (typeof nodeId !== 'string' || !NODE_ID_PATTERN.test(nodeId)) {
-      return json({ error: 'Invalid nodeId' }, 400);
-    }
+    if (typeof nodeId !== 'string' || !NODE_ID_PATTERN.test(nodeId)) return json({ error: 'Invalid nodeId' }, 400);
     if (!(await checkUserNodeAuthorization(this.env.DB, userAuth.userId, nodeId))) {
       return json({ error: 'Forbidden: user is not authorized for this node' }, 403);
     }
@@ -122,7 +110,6 @@ export class BEEMAXSecureNodeRegistryDO {
       expiresAt: now + TICKET_TTL_MS,
       sessionExpiresAt: now + SOCKET_TTL_MS,
     };
-
     try {
       await this.state.storage.put(`ticket:${token}`, ticket);
     } catch {
@@ -132,19 +119,13 @@ export class BEEMAXSecureNodeRegistryDO {
     const cookie = `beemax_upgrade_ticket=${token}; HttpOnly; Secure; SameSite=Strict; Path=/ws; Max-Age=60`;
     return new Response(JSON.stringify({ status: 'ready', nodeId }), {
       status: 200,
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        'Set-Cookie': cookie,
-      },
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': cookie },
     });
   }
 
   private async upgradeWebSocket(request: Request): Promise<Response> {
     const token = this.extractCookie(request, 'beemax_upgrade_ticket');
-    if (!token || !/^[\da-f-]{36}$/i.test(token)) {
-      return new Response('Unauthorized WebSocket upgrade', { status: 401 });
-    }
+    if (!token || !/^[\da-f-]{36}$/i.test(token)) return new Response('Unauthorized WebSocket upgrade', { status: 401 });
 
     const now = Date.now();
     let ticket: UpgradeTicket | undefined;
@@ -153,8 +134,7 @@ export class BEEMAXSecureNodeRegistryDO {
         const key = `ticket:${token}`;
         const stored = await txn.get<UpgradeTicket>(key);
         if (
-          !stored || stored.token !== token ||
-          !NODE_ID_PATTERN.test(stored.nodeId) ||
+          !stored || stored.token !== token || !NODE_ID_PATTERN.test(stored.nodeId) ||
           !Number.isSafeInteger(stored.expiresAt) || stored.expiresAt <= now ||
           !Number.isSafeInteger(stored.sessionExpiresAt) || stored.sessionExpiresAt <= now
         ) return undefined;
@@ -164,7 +144,6 @@ export class BEEMAXSecureNodeRegistryDO {
     } catch {
       return new Response('WebSocket ticket validation unavailable', { status: 503 });
     }
-
     if (!ticket) return new Response('Invalid or expired WebSocket ticket', { status: 401 });
 
     const pair = new WebSocketPair();
@@ -172,7 +151,6 @@ export class BEEMAXSecureNodeRegistryDO {
     const server = pair[1] as unknown as SecureSocket;
     this.state.acceptWebSocket(server);
     server.serializeAttachment({ nodeId: ticket.nodeId, sessionExpiresAt: ticket.sessionExpiresAt } satisfies SocketAttachment);
-
     return new Response(null, { status: 101, webSocket: client } as ResponseInit);
   }
 
@@ -187,7 +165,6 @@ export class BEEMAXSecureNodeRegistryDO {
         socket.close(1008, 'Session expired');
         return;
       }
-
       if (typeof message !== 'string' || message.length > MAX_FRAME_LENGTH) {
         socket.send(JSON.stringify({ error: 'Oversized or malformed frame' }));
         return;
@@ -198,11 +175,9 @@ export class BEEMAXSecureNodeRegistryDO {
         socket.send(JSON.stringify({ error: 'Invalid frame' }));
         return;
       }
-
       const { type, nodeId, nonce, issuedAt } = parsed;
       if (
-        typeof type !== 'string' || !ALLOWED_FRAME_TYPES.has(type) ||
-        nodeId !== attachment.nodeId ||
+        typeof type !== 'string' || !ALLOWED_FRAME_TYPES.has(type) || nodeId !== attachment.nodeId ||
         typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(nonce) ||
         typeof issuedAt !== 'number' || !Number.isSafeInteger(issuedAt)
       ) {
@@ -225,9 +200,7 @@ export class BEEMAXSecureNodeRegistryDO {
         socket.send(JSON.stringify({ error: 'Nonce replayed' }));
         return;
       }
-
-      // Add operation-specific authorization and durable idempotency before
-      // implementing any state-changing event handling.
+      // Operation-specific authorization and durable idempotency are still required before state changes.
       socket.send(JSON.stringify({ status: 'acknowledged', type, nodeId: attachment.nodeId }));
     } catch {
       socket.send(JSON.stringify({ error: 'Malformed frame payload' }));

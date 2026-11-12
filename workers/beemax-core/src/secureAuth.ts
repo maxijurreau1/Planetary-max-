@@ -1,11 +1,16 @@
+import { base64UrlToBytes, decodeUtf8Json } from './utils/jwt';
+
 export interface AuthEnv {
-  SESSION_KV: KVNamespace;
+  SESSION_KV: Pick<KVNamespace, 'get'>;
   JWT_SECRET: string;
+  JWT_ISSUER: string;
+  JWT_AUDIENCE: string;
 }
 
 export interface SessionVerificationResult {
   authorized: boolean;
   userId?: string;
+  role?: string;
 }
 
 interface JwtHeader {
@@ -16,12 +21,20 @@ interface JwtHeader {
 
 interface JwtPayload {
   sub?: unknown;
+  iss?: unknown;
+  aud?: unknown;
   exp?: unknown;
   iat?: unknown;
   nbf?: unknown;
   jti?: unknown;
+  role?: unknown;
   [key: string]: unknown;
 }
+
+const MAX_TOKEN_LENGTH = 8192;
+const MAX_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+const CLOCK_SKEW_SECONDS = 30;
+const ALLOWED_ROLES = new Set(['operator', 'admin', 'auditor', 'node-agent', 'user']);
 
 function extractCookie(cookieHeader: string, name: string): string | null {
   for (const segment of cookieHeader.split(';')) {
@@ -36,64 +49,59 @@ function extractCookie(cookieHeader: string, name: string): string | null {
   return null;
 }
 
-function decodeBase64Url(value: string): Uint8Array | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
-  try {
-    const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4);
-    const binary = atob(base64);
-    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  } catch {
-    return null;
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function decodeJsonPart<T>(value: string): T | null {
-  const bytes = decodeBase64Url(value);
-  if (!bytes) return null;
-  try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as T;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Verifies an HS256 user-session JWT and checks its revocation marker in KV.
- * The JWT must include sub, exp, and jti claims. Missing configuration,
- * invalid claims/signature, KV errors, and revoked sessions all fail closed.
- */
+/** Verifies an HS256 session and requires an active KV session record. */
 export async function verifyRealUserSession(request: Request, env: AuthEnv): Promise<SessionVerificationResult> {
   try {
-    if (!env.JWT_SECRET || !env.SESSION_KV) return { authorized: false };
+    if (
+      !env.JWT_SECRET || new TextEncoder().encode(env.JWT_SECRET).byteLength < 32 ||
+      !env.JWT_ISSUER || !env.JWT_AUDIENCE ||
+      !env.SESSION_KV || typeof env.SESSION_KV.get !== 'function'
+    ) return { authorized: false };
+
     const cookieHeader = request.headers.get('Cookie');
     if (!cookieHeader) return { authorized: false };
-
     const token = extractCookie(cookieHeader, 'beemax_auth_session');
-    if (!token || token.length > 8192) return { authorized: false };
+    if (!token || token.length > MAX_TOKEN_LENGTH) return { authorized: false };
+
     const parts = token.split('.');
     if (parts.length !== 3) return { authorized: false };
     const [encodedHeader, encodedPayload, encodedSignature] = parts;
-
-    const header = decodeJsonPart<JwtHeader>(encodedHeader);
-    const payload = decodeJsonPart<JwtPayload>(encodedPayload);
-    const signature = decodeBase64Url(encodedSignature);
-    if (!header || !payload || !signature || header.alg !== 'HS256' || (header.typ !== undefined && header.typ !== 'JWT')) {
+    const header = decodeUtf8Json(encodedHeader);
+    const payload = decodeUtf8Json(encodedPayload);
+    const signature = base64UrlToBytes(encodedSignature);
+    if (!isRecord(header) || !isRecord(payload) || !signature || signature.byteLength !== 32) {
       return { authorized: false };
     }
-    if (Object.hasOwn(header, 'crit') || Object.hasOwn(header, 'b64')) return { authorized: false };
 
-    const userId = payload.sub;
-    const tokenId = payload.jti;
-    const nowSeconds = Math.floor(Date.now() / 1000);
+    const jwtHeader = header as JwtHeader;
     if (
-      typeof userId !== 'string' || userId.length < 1 || userId.length > 256 ||
-      typeof tokenId !== 'string' || tokenId.length < 1 || tokenId.length > 256 ||
-      typeof payload.exp !== 'number' || !Number.isSafeInteger(payload.exp) || payload.exp <= nowSeconds ||
-      (payload.iat !== undefined && (typeof payload.iat !== 'number' || !Number.isSafeInteger(payload.iat) || payload.iat > nowSeconds + 60)) ||
-      (payload.nbf !== undefined && (typeof payload.nbf !== 'number' || !Number.isSafeInteger(payload.nbf) || payload.nbf > nowSeconds))
-    ) {
-      return { authorized: false };
-    }
+      Object.keys(jwtHeader).some((key) => key !== 'alg' && key !== 'typ') ||
+      jwtHeader.alg !== 'HS256' || jwtHeader.typ !== 'JWT'
+    ) return { authorized: false };
+
+    const jwtPayload = payload as JwtPayload;
+    if (jwtPayload.iss !== env.JWT_ISSUER || jwtPayload.aud !== env.JWT_AUDIENCE) return { authorized: false };
+    if (
+      typeof jwtPayload.sub !== 'string' || !jwtPayload.sub.trim() || jwtPayload.sub.length > 128 ||
+      typeof jwtPayload.jti !== 'string' || jwtPayload.jti.length < 8 || jwtPayload.jti.length > 64 ||
+      (jwtPayload.role !== undefined && (typeof jwtPayload.role !== 'string' || !ALLOWED_ROLES.has(jwtPayload.role)))
+    ) return { authorized: false };
+
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      !Number.isSafeInteger(jwtPayload.iat) || !Number.isSafeInteger(jwtPayload.exp) ||
+      jwtPayload.exp <= jwtPayload.iat || jwtPayload.exp - jwtPayload.iat > MAX_TOKEN_TTL_SECONDS ||
+      jwtPayload.iat > now + CLOCK_SKEW_SECONDS || now >= jwtPayload.exp
+    ) return { authorized: false };
+    if (jwtPayload.nbf !== undefined && (
+      !Number.isSafeInteger(jwtPayload.nbf) ||
+      jwtPayload.nbf > now + CLOCK_SKEW_SECONDS ||
+      jwtPayload.nbf >= jwtPayload.exp
+    )) return { authorized: false };
 
     const key = await crypto.subtle.importKey(
       'raw',
@@ -103,26 +111,25 @@ export async function verifyRealUserSession(request: Request, env: AuthEnv): Pro
       ['verify'],
     );
     const validSignature = await crypto.subtle.verify(
-      'HMAC',
-      key,
-      signature,
-      new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`),
+      'HMAC', key, signature, new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`),
     );
     if (!validSignature) return { authorized: false };
 
-    const revoked = await env.SESSION_KV.get(`session:active:${userId}:${tokenId}`);
-    if (revoked === 'revoked') return { authorized: false };
-    return { authorized: true, userId };
+    const sessionStatus = await env.SESSION_KV.get(`session:active:${jwtPayload.sub}:${jwtPayload.jti}`);
+    if (sessionStatus !== 'active') return { authorized: false };
+
+    return {
+      authorized: true,
+      userId: jwtPayload.sub,
+      role: typeof jwtPayload.role === 'string' ? jwtPayload.role : 'user',
+    };
   } catch {
-    // Never log cookies, JWTs, or signature material.
+    // Fail closed; do not log cookies, JWTs, or credential material.
     return { authorized: false };
   }
 }
 
-/**
- * Returns true only for active users with an operator/admin ACL entry for an
- * existing node. Database errors and missing rows fail closed.
- */
+/** Returns true only for active users with an operator/admin ACL entry for an existing node. */
 export async function checkUserNodeAuthorization(db: D1Database, userId: string, nodeId: string): Promise<boolean> {
   try {
     if (!userId || !nodeId) return false;
@@ -139,7 +146,6 @@ export async function checkUserNodeAuthorization(db: D1Database, userId: string,
     `).bind(userId, nodeId).first<{ 1: number }>();
     return result !== null;
   } catch {
-    // Fail closed without logging identifiers or credentials.
     return false;
   }
 }
