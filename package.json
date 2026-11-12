@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
     "build": "esbuild src/index.tsx --bundle --outfile=dist/index.js --loader:.tsx=tsx --format=esm --minify",
     "test": "vitest run"
