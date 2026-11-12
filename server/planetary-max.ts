@@ -42,7 +42,7 @@ const requireQALAuth: MiddlewareHandler<{ Bindings: Bindings; Variables: Variabl
   const nodeId = c.req.header('X-Node-ID');
   const timestamp = c.req.header('X-QAL-Timestamp');
 
-  if (!signature || !nodeId || !timestamp || !/^\\d{13}$/.test(timestamp) || !/^[a-zA-Z0-9._:-]{1,128}$/.test(nodeId)) {
+  if (!signature || !nodeId || !timestamp || !/^\d{13}$/.test(timestamp) || !/^[a-zA-Z0-9._:-]{1,128}$/.test(nodeId)) {
     return c.json({ success: false, error: 'QAL_AUTH_FAILED: Missing or malformed authentication headers' }, 401);
   }
 
