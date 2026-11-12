@@ -2,6 +2,9 @@ name = "beemax-core"
 main = "src/index.ts"
 compatibility_date = "2026-11-12"
 
+[vars]
+DEFAULT_NODE_ID = "node-default"
+
 [[durable_objects.bindings]]
 name = "NODE_REGISTRY"
 class_name = "NodeRegistryDO"

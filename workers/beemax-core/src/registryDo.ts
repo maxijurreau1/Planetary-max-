@@ -26,6 +26,8 @@ interface RegistryState {
 
 interface RegistryEnv {
   REGISTRY_INTERNAL_TOKEN?: string;
+  QAL_SECRET?: string;
+  DEFAULT_NODE_ID?: string;
 }
 
 const json = (body: unknown, status = 200): Response => Response.json(body, {
@@ -102,9 +104,32 @@ export class NodeRegistryDO {
 
   private async getSecretState(nodeId: string): Promise<Response> {
     if (!NODE_ID_PATTERN.test(nodeId)) return json({ error: 'Invalid node ID' }, 400);
-    const record = await this.state.storage.get<NodeSecretState>(`node:${nodeId}`);
-    if (!record) return json({ error: 'Node not found' }, 404);
-    return json(record);
+    try {
+      const record = await this.state.storage.transaction(async (txn) => {
+        const key = `node:${nodeId}`;
+        const existing = await txn.get<NodeSecretState>(key);
+        if (existing) return existing;
+
+        // One-time migration of the configured legacy node secret. Never seed
+        // from a hard-coded/default secret; QAL_SECRET must be configured as a
+        // Worker secret and only the designated legacy node can be bootstrapped.
+        const defaultNodeId = this.env.DEFAULT_NODE_ID ?? 'node-default';
+        if (nodeId !== defaultNodeId || !isValidSecret(this.env.QAL_SECRET)) return undefined;
+
+        const initial: NodeSecretState = {
+          nodeId,
+          currentSecret: this.env.QAL_SECRET,
+          currentVersion: 1,
+        };
+        await txn.put(key, initial);
+        return initial;
+      });
+
+      if (!record) return json({ error: 'Node not found and legacy bootstrap is unavailable' }, 404);
+      return json(record);
+    } catch {
+      return json({ error: 'Node registry unavailable' }, 503);
+    }
   }
 
   private async getNodeMetadata(nodeId: string): Promise<Response> {
@@ -147,7 +172,19 @@ export class NodeRegistryDO {
     try {
       const result = await this.state.storage.transaction(async (txn) => {
         const storageKey = `node:${nodeId}`;
-        const existing = await txn.get<NodeSecretState>(storageKey);
+        let existing = await txn.get<NodeSecretState>(storageKey);
+
+        // Permit rotation to initialize only the configured legacy node, using
+        // the explicitly configured legacy secret. Missing/weak secrets fail
+        // closed; there is deliberately no built-in fallback credential.
+        const defaultNodeId = this.env.DEFAULT_NODE_ID ?? 'node-default';
+        if (!existing && nodeId === defaultNodeId && isValidSecret(this.env.QAL_SECRET)) {
+          existing = {
+            nodeId,
+            currentSecret: this.env.QAL_SECRET,
+            currentVersion: 1,
+          };
+        }
         if (!existing) return { error: 'Node not found', status: 404 as const };
 
         if (existing.nodeId !== nodeId || !isValidSecret(existing.currentSecret) || !Number.isSafeInteger(existing.currentVersion)) {

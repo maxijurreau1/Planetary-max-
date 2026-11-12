@@ -14,8 +14,8 @@ class MockDurableObjectStorage {
   }
 
   async transaction<T>(closure: (txn: MockDurableObjectStorage) => Promise<T>): Promise<T> {
-    // Tests exercise single operations. Cloudflare Durable Object storage
-    // provides the transaction isolation in deployment.
+    // These are unit-level state-transition tests. Cloudflare Durable Object
+    // storage supplies transaction isolation in deployment.
     return closure(this);
   }
 }
@@ -27,45 +27,83 @@ class MockDurableObjectState {
 const SECRET_V1 = 'secret-v1-0123456789-abcdefghijkl';
 const SECRET_V2 = 'secret-v2-0123456789-abcdefghijkl';
 const SECRET_V3 = 'secret-v3-0123456789-abcdefghijkl';
+const INTERNAL_TOKEN = 'internal-test-token';
 
-function rotateRequest(body: object): Request {
-  return new Request('https://registry/registry/rotate', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer internal-test-token',
-    },
-    body: JSON.stringify(body),
+function registryRequest(path: string, options: { method?: string; body?: object; authorized?: boolean } = {}): Request {
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  if (options.authorized !== false) headers.set('Authorization', `Bearer ${INTERNAL_TOKEN}`);
+  return new Request(`https://registry${path}`, {
+    method: options.method ?? 'GET',
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined,
   });
 }
 
-describe('NodeRegistryDO transactional rotation', () => {
+function rotateRequest(body: object): Request {
+  return registryRequest('/registry/rotate', { method: 'POST', body });
+}
+
+describe('NodeRegistryDO bootstrap and rotation', () => {
   let registryDO: NodeRegistryDO;
   let mockState: MockDurableObjectState;
 
   beforeEach(() => {
     mockState = new MockDurableObjectState();
-    registryDO = new NodeRegistryDO(mockState as never, { REGISTRY_INTERNAL_TOKEN: 'internal-test-token' });
+    registryDO = new NodeRegistryDO(mockState as never, {
+      REGISTRY_INTERNAL_TOKEN: INTERNAL_TOKEN,
+      DEFAULT_NODE_ID: 'node-alpha',
+      QAL_SECRET: SECRET_V1,
+    });
   });
 
-  it('rotates a registered node when expectedVersion matches without exposing secrets', async () => {
-    const initialState: NodeSecretState = {
+  it('bootstraps only the configured default node from the legacy Worker secret', async () => {
+    const response = await registryDO.fetch(registryRequest('/registry/internal/state/node-alpha'));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
       nodeId: 'node-alpha',
       currentSecret: SECRET_V1,
       currentVersion: 1,
-    };
-    await mockState.storage.put('node:node-alpha', initialState);
+    });
 
-    const response = await registryDO.fetch(rotateRequest({
+    const otherNode = await registryDO.fetch(registryRequest('/registry/internal/state/node-other'));
+    expect(otherNode.status).toBe(404);
+  });
+
+  it('fails closed without a configured legacy secret and has no hard-coded fallback credential', async () => {
+    const withoutLegacySecret = new NodeRegistryDO(mockState as never, {
+      REGISTRY_INTERNAL_TOKEN: INTERNAL_TOKEN,
+      DEFAULT_NODE_ID: 'node-alpha',
+    });
+    const response = await withoutLegacySecret.fetch(registryRequest('/registry/internal/state/node-alpha'));
+    expect(response.status).toBe(404);
+  });
+
+  it('requires internal authorization for secret state and rotation', async () => {
+    const stateResponse = await registryDO.fetch(registryRequest('/registry/internal/state/node-alpha', { authorized: false }));
+    expect(stateResponse.status).toBe(401);
+    const rotationResponse = await registryDO.fetch(registryRequest('/registry/rotate', {
+      method: 'POST',
+      body: { nodeId: 'node-alpha', newSecret: SECRET_V2, expectedVersion: 1 },
+      authorized: false,
+    }));
+    expect(rotationResponse.status).toBe(401);
+  });
+
+  it('rotates a registered node when expectedVersion matches without exposing secrets', async () => {
+    await mockState.storage.put('node:node-alpha', {
+      nodeId: 'node-alpha', currentSecret: SECRET_V1, currentVersion: 1,
+    } satisfies NodeSecretState);
+
+    const tooShortGrace = await registryDO.fetch(rotateRequest({
       nodeId: 'node-alpha', newSecret: SECRET_V2, expectedVersion: 1, gracePeriodMs: 5000,
     }));
-    expect(response.status).toBe(400); // Grace periods shorter than 60 seconds are rejected.
+    expect(tooShortGrace.status).toBe(400);
 
-    const accepted = await registryDO.fetch(rotateRequest({
+    const response = await registryDO.fetch(rotateRequest({
       nodeId: 'node-alpha', newSecret: SECRET_V2, expectedVersion: 1, gracePeriodMs: 60_000,
     }));
-    expect(accepted.status).toBe(200);
-    const metadata = await accepted.json() as Record<string, unknown>;
+    expect(response.status).toBe(200);
+    const metadata = await response.json() as Record<string, unknown>;
     expect(metadata.currentVersion).toBe(1);
     expect(metadata.nextVersion).toBe(2);
     expect(metadata.nextExpiresAt).toBeTypeOf('number');
@@ -102,7 +140,42 @@ describe('NodeRegistryDO transactional rotation', () => {
     expect((await response.json() as { error: string }).error).toContain('Existing nextSecret is still valid');
   });
 
-  it('does not create an unregistered node during rotation', async () => {
+  it('promotes an expired next secret before scheduling the next rotation', async () => {
+    await mockState.storage.put('node:node-alpha', {
+      nodeId: 'node-alpha',
+      currentSecret: SECRET_V1,
+      currentVersion: 1,
+      nextSecret: SECRET_V2,
+      nextVersion: 2,
+      nextExpiresAt: Date.now() - 1,
+    } satisfies NodeSecretState);
+
+    const response = await registryDO.fetch(rotateRequest({
+      nodeId: 'node-alpha', newSecret: SECRET_V3, expectedVersion: 1,
+    }));
+    expect(response.status).toBe(200);
+    expect(await mockState.storage.get<NodeSecretState>('node:node-alpha')).toMatchObject({
+      currentSecret: SECRET_V2,
+      currentVersion: 2,
+      nextSecret: SECRET_V3,
+      nextVersion: 3,
+    });
+  });
+
+  it('can seed and rotate the default node in one authorized operation', async () => {
+    const response = await registryDO.fetch(rotateRequest({
+      nodeId: 'node-alpha', newSecret: SECRET_V2, expectedVersion: 1,
+    }));
+    expect(response.status).toBe(200);
+    expect(await mockState.storage.get<NodeSecretState>('node:node-alpha')).toMatchObject({
+      currentSecret: SECRET_V1,
+      currentVersion: 1,
+      nextSecret: SECRET_V2,
+      nextVersion: 2,
+    });
+  });
+
+  it('does not create an unregistered non-default node during rotation', async () => {
     const response = await registryDO.fetch(rotateRequest({
       nodeId: 'node-missing', newSecret: SECRET_V2, expectedVersion: 1,
     }));
