@@ -9,6 +9,14 @@ DEFAULT_NODE_ID = "node-default"
 name = "NODE_REGISTRY"
 class_name = "NodeRegistryDO"
 
+[[durable_objects.bindings]]
+name = "BEEMAX_SECURE_REGISTRY"
+class_name = "BEEMAXSecureNodeRegistryDO"
+
 [[migrations]]
 tag = "v1-node-registry"
 new_sqlite_classes = ["NodeRegistryDO"]
+
+[[migrations]]
+tag = "v2-secure-registry"
+new_sqlite_classes = ["BEEMAXSecureNodeRegistryDO"]
