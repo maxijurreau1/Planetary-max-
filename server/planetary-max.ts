@@ -25,6 +25,28 @@ app.use('/api/*', cors({
   allowHeaders: ['Content-Type', 'X-QAL-Signature', 'X-Node-ID', 'X-QAL-Timestamp'],
 }));
 
+app.get('/api/artworks', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      `SELECT a.id, a.artist_id, a.title, a.medium, a.dimensions, a.price_cents, a.image_url, a.status,
+              u.username AS artist_name, p.bio, p.portfolio_url
+       FROM artworks a
+       JOIN users u ON u.id = a.artist_id
+       LEFT JOIN artist_profiles p ON p.user_id = a.artist_id
+       ORDER BY a.created_at DESC`
+    ).all();
+    return c.json({ artworks: results ?? [] });
+  } catch (error) {
+    console.error('Failed to retrieve artwork inventory:', error);
+    return c.json({ error: 'Failed to retrieve artwork inventory' }, 500);
+  }
+});
+
+// Orders remain deliberately unavailable until user sessions and a payment provider are integrated.
+app.post('/api/marketplace/orders', (c) =>
+  c.json({ error: 'Marketplace checkout is not enabled yet.' }, 503)
+);
+
 app.get('/api/assets', async (c) => {
   try {
     const { results } = await c.env.DB.prepare(

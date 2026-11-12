@@ -10,6 +10,10 @@ binding = "DB"
 database_name = "beemax-production-db"
 database_id = "5a8e3def-a8ef-4fda-907f-20bc5f24a501"
 
+[[kv_namespaces]]
+binding = "SESSION_KV"
+namespace_id = "7e90756b6ea84160b91bcea3a7e4d3c7"
+
 [[durable_objects.bindings]]
 name = "NODE_REGISTRY"
 class_name = "NodeRegistryDO"
@@ -29,3 +33,4 @@ new_sqlite_classes = ["BEEMAXSecureNodeRegistryDO"]
 [assets]
 directory = "./dist"
 binding = "ASSETS"
+not_found_handling = "single-page-application"

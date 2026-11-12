@@ -1,177 +1,68 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ArtworkLightbox } from './components/ArtworkLightbox';
+import { ArtistStorefront } from './components/ArtistStorefront';
+import { GalleryWall } from './components/GalleryWall';
+import type { Artwork } from './hooks/useArtworks';
+import { useArtworks } from './hooks/useArtworks';
+import { showroomStyles } from './showroomStyles';
 
-interface PlanetaryAsset {
-  asset_id: string;
-  creator: string;
-  title: string;
-  category: string;
-  quantum_hash: string;
-  signature: string;
-  created_at: number;
-}
+type View = 'gallery' | 'marketplace' | 'artist';
 
-type ActiveTab = 'gallery' | 'marketplace' | 'hud' | 'account';
+export function App() {
+  const { artworks, loading, error } = useArtworks();
+  const [view, setView] = useState<View>('gallery');
+  const [selectedArtwork, setSelectedArtwork] = useState<Artwork | null>(null);
+  const [activeArtistId, setActiveArtistId] = useState<string | null>(null);
 
-export function PortalOS1App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('gallery');
-  const [assets, setAssets] = useState<PlanetaryAsset[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [assetError, setAssetError] = useState<string | null>(null);
-  const [hudLogs, setHudLogs] = useState<string[]>([
-    'SYSTEM INITIALIZED // LOCAL HUD DEMO',
-    'PUBLIC ASSET API: /api/assets'
-  ]);
-  const [hudInput, setHudInput] = useState('');
+  const artists = useMemo(() => {
+    const unique = new Map<string, Artwork>();
+    artworks.forEach(artwork => { if (!unique.has(artwork.artist_id)) unique.set(artwork.artist_id, artwork); });
+    return [...unique.values()];
+  }, [artworks]);
+  const activeArtist = artists.find(artwork => artwork.artist_id === activeArtistId) ?? artists[0];
+  const artistWorks = activeArtist ? artworks.filter(artwork => artwork.artist_id === activeArtist.artist_id) : [];
+  const marketplaceWorks = artworks.filter(artwork => artwork.status === 'available');
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchAssets() {
-      try {
-        const response = await fetch('/api/assets');
-        if (!response.ok) throw new Error(`Asset service returned ${response.status}`);
-        const data: { success?: boolean; assets?: PlanetaryAsset[]; error?: string } = await response.json();
-        if (!data.success || !Array.isArray(data.assets)) {
-          throw new Error(data.error || 'The asset service returned an invalid response.');
-        }
-        if (!cancelled) setAssets(data.assets);
-      } catch (error) {
-        if (!cancelled) {
-          setAssetError(error instanceof Error ? error.message : 'Unable to load assets.');
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    void fetchAssets();
-    return () => { cancelled = true; };
-  }, []);
-
-  const handleHudSubmit = (event: React.FormEvent) => {
-    event.preventDefault();
-    const command = hudInput.trim();
-    if (!command) return;
-
-    setHudLogs(previous => [
-      ...previous,
-      `> ${command}`,
-      'LOCAL HUD DEMO: command recorded in this browser; no worker action was performed.'
-    ]);
-    setHudInput('');
+  const openArtist = (artwork: Artwork) => {
+    setActiveArtistId(artwork.artist_id);
+    setView('artist');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const navButton = (tab: ActiveTab, label: string) => (
-    <button
-      key={tab}
-      type="button"
-      onClick={() => setActiveTab(tab)}
-      aria-current={activeTab === tab ? 'page' : undefined}
-      className={`px-3 py-1 text-xs border ${activeTab === tab ? 'bg-emerald-900 text-white border-emerald-500' : 'bg-black text-emerald-400 border-emerald-900'}`}
-    >
-      {label}
-    </button>
-  );
-
   return (
-    <div className="min-h-screen bg-black text-emerald-400 font-mono p-4 md:p-6 selection:bg-emerald-900 selection:text-white">
-      <header className="border border-emerald-800 p-4 mb-6 flex flex-col md:flex-row justify-between items-start md:items-center bg-zinc-950 gap-4">
-        <div>
-          <h1 className="text-xl font-bold tracking-widest text-white">PORTAL-OS1 // PLANETARY-MAX</h1>
-          <p className="text-xs text-emerald-500 mt-1">BEEMAX DIGITAL SPACE // WORKER-BACKED ASSET API</p>
+    <div className="showroom-app">
+      <style>{showroomStyles}</style>
+      <nav className="site-nav" aria-label="Main navigation">
+        <button className="brand-mark" type="button" onClick={() => setView('gallery')} aria-label="Planetary-Max showroom home"><span className="brand-symbol">P</span><span>PLANETARY-MAX<small>JURREAUISM</small></span></button>
+        <div className="nav-links">
+          <button className={view === 'gallery' ? 'nav-link active' : 'nav-link'} type="button" onClick={() => setView('gallery')}>Showroom</button>
+          <button className={view === 'marketplace' ? 'nav-link active' : 'nav-link'} type="button" onClick={() => setView('marketplace')}>Marketplace</button>
+          <button className={view === 'artist' ? 'nav-link active' : 'nav-link'} type="button" onClick={() => { if (activeArtist) setView('artist'); else if (artists[0]) openArtist(artists[0]); }}>{activeArtist ? 'Artist studio' : 'Artists'}</button>
         </div>
-        <nav aria-label="Main navigation" className="flex flex-wrap gap-2">
-          {navButton('gallery', 'ASSET GALLERY')}
-          {navButton('marketplace', 'MARKETPLACE')}
-          {navButton('hud', 'SPATIAL HUD')}
-          {navButton('account', 'ACCOUNT & AUTH')}
-        </nav>
-      </header>
+        <span className="nav-edition">ONLINE EXHIBITION <i aria-hidden="true" /></span>
+      </nav>
 
-      <main className="grid grid-cols-1 gap-6">
-        {activeTab === 'gallery' && (
-          <section className="border border-emerald-800 p-6 bg-zinc-950/50" aria-labelledby="gallery-heading">
-            <h2 id="gallery-heading" className="text-lg font-semibold text-white mb-4">SPATIAL ASSET GALLERY &amp; REGISTRY</h2>
-            {loading ? (
-              <p role="status" className="text-xs animate-pulse">QUERYING THE PLANETARY-MAX ASSET API...</p>
-            ) : assetError ? (
-              <p role="alert" className="text-xs text-amber-400">Unable to load registered assets: {assetError}</p>
-            ) : assets.length === 0 ? (
-              <p className="text-xs text-zinc-400">No registered assets are available yet.</p>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {assets.map(asset => (
-                  <article key={asset.asset_id} className="border border-emerald-900 p-4 bg-black flex flex-col justify-between">
-                    <div>
-                      <div className="flex justify-between text-xs text-emerald-600 mb-1">
-                        <span>ID: {asset.asset_id}</span>
-                        <span>{asset.signature}</span>
-                      </div>
-                      <h3 className="text-white font-bold text-sm mb-2">{asset.title}</h3>
-                      <p className="text-xs text-emerald-400 mb-2">Category: {asset.category}</p>
-                      <p className="text-xs text-zinc-400 break-all font-mono">Hash: {asset.quantum_hash}</p>
-                      <p className="text-xs text-zinc-500 mt-2">Creator: {asset.creator}</p>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
+      {view === 'gallery' ? (
+        <GalleryWall artworks={artworks} loading={loading} error={error} onSelectArtwork={setSelectedArtwork} onSelectArtist={openArtist} />
+      ) : view === 'artist' ? (
+        activeArtist ? <ArtistStorefront artistName={activeArtist.artist_name} bio={activeArtist.bio || ''} portfolioUrl={activeArtist.portfolio_url} artworks={artistWorks} onSelectArtwork={setSelectedArtwork} /> : <div className="showroom-page"><div className="showroom-state">{loading ? 'Preparing artist studios…' : 'Artist profiles will appear with the collection.'}</div></div>
+      ) : (
+        <main className="showroom-page marketplace-page">
+          <header className="marketplace-hero"><span className="eyebrow">The collection · Acquisition</span><h1>Find a piece<br /><span>to live with.</span></h1><p>Explore available works from the exhibition. Select a piece to view its story and details.</p><div className="marketplace-rule"><span>{marketplaceWorks.length.toString().padStart(2, '0')} AVAILABLE WORKS</span><span>CHECKOUT NOT YET OPEN</span></div></header>
+          {loading ? <div className="showroom-state" role="status">Preparing the collection…</div> : error ? <div className="showroom-state showroom-error" role="alert">The collection could not be loaded. {error}</div> : marketplaceWorks.length === 0 ? <div className="showroom-state">No works are currently available for acquisition.</div> : (
+            <div className="artwork-grid marketplace-grid">{marketplaceWorks.map(artwork => (
+              <article className="artwork-card" key={artwork.id}><button className="artwork-image-button" type="button" onClick={() => setSelectedArtwork(artwork)} aria-label={`View ${artwork.title} details`}><div className="artwork-image-wrap"><img src={artwork.image_url} alt={artwork.title} loading="lazy" /><span className="status-chip status-available">Available</span><span className="view-artwork">View artwork <span aria-hidden="true">↗</span></span></div></button><div className="artwork-caption"><div><p className="artwork-artist">{artwork.artist_name}</p><h3>{artwork.title}</h3></div><span className="artwork-price">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(artwork.price_cents / 100)}</span></div><p className="artwork-meta">{artwork.medium}{artwork.dimensions ? ` · ${artwork.dimensions}` : ''}</p></article>
+            ))}</div>
+          )}
+          <footer className="showroom-footer"><span>PLANETARY-MAX / JURREAUISM</span><span>ACQUISITIONS OPEN WHEN SECURE CHECKOUT IS READY</span></footer>
+        </main>
+      )}
 
-        {activeTab === 'marketplace' && (
-          <section className="border border-emerald-800 p-6 bg-zinc-950/50" aria-labelledby="market-heading">
-            <h2 id="market-heading" className="text-lg font-semibold text-white mb-4">BEEMAX MARKETPLACE</h2>
-            <p className="text-xs text-zinc-300 mb-3">A storefront for digital spaces and planetary compute services.</p>
-            <p className="text-xs text-amber-400 border border-amber-900 bg-black p-3">
-              Marketplace checkout and sovereign-ledger transaction endpoints are not configured in this deployment. No purchases, balances, staking, or yield claims are active here.
-            </p>
-          </section>
-        )}
-
-        {activeTab === 'hud' && (
-          <section className="border border-emerald-800 p-6 bg-zinc-950/50" aria-labelledby="hud-heading">
-            <h2 id="hud-heading" className="text-lg font-semibold text-white mb-2">SPATIAL HUD // LOCAL DEMO</h2>
-            <p className="text-xs text-zinc-400 mb-4">Commands are displayed locally; this console does not execute worker operations.</p>
-            <div role="log" aria-live="polite" className="border border-emerald-900 bg-black p-4 h-64 overflow-y-auto mb-4 font-mono text-xs flex flex-col gap-2">
-              {hudLogs.map((log, index) => (
-                <div key={`${index}-${log}`} className={log.startsWith('LOCAL') ? 'text-white' : 'text-emerald-500'}>{log}</div>
-              ))}
-            </div>
-            <form onSubmit={handleHudSubmit} className="flex gap-2">
-              <input
-                type="text"
-                value={hudInput}
-                onChange={event => setHudInput(event.target.value)}
-                aria-label="HUD demo command"
-                placeholder="Enter a local demo command..."
-                className="flex-1 bg-black border border-emerald-900 px-4 py-2 text-xs text-emerald-400 focus:outline-none focus:border-emerald-500"
-              />
-              <button type="submit" className="border border-emerald-700 bg-emerald-950 px-6 py-2 text-xs text-white hover:bg-emerald-900">TRANSMIT</button>
-            </form>
-          </section>
-        )}
-
-        {activeTab === 'account' && (
-          <section className="border border-emerald-800 p-6 bg-zinc-950/50" aria-labelledby="account-heading">
-            <h2 id="account-heading" className="text-lg font-semibold text-white mb-4">ACCOUNT &amp; WORKER AUTHENTICATION</h2>
-            <p className="text-xs text-zinc-300 mb-3">This deployment does not provide browser-user login or account sessions.</p>
-            <p className="text-xs text-zinc-400">
-              The worker currently supports QAL-signed requests from registered nodes for protected node telemetry. It is node-to-worker authentication, not a human login system. Keep the QAL secret on a trusted server; do not put it in this browser app.
-            </p>
-            <p className="text-xs text-zinc-400 mt-3">
-              User accounts, auditable economic transactions, and a sovereign ledger API must be implemented and configured on the worker before this storefront can safely display authenticated identities or balances.
-            </p>
-          </section>
-        )}
-      </main>
+      {selectedArtwork && <ArtworkLightbox artwork={selectedArtwork} onClose={() => setSelectedArtwork(null)} />}
     </div>
   );
 }
 
 const container = document.getElementById('app');
-if (container) {
-  const root = createRoot(container);
-  root.render(<PortalOS1App />);
-}
+if (container) createRoot(container).render(<App />);
