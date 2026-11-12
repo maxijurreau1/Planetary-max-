@@ -20,13 +20,17 @@ function safeTokenEqual(actual: string | null, expected: string | undefined): bo
   return mismatch === 0;
 }
 
+function isOperatorAuthorized(request: Request, env: Env): boolean {
+  const token = request.headers.get('Authorization');
+  return safeTokenEqual(token, env.OPERATOR_ADMIN_TOKEN ? `Bearer ${env.OPERATOR_ADMIN_TOKEN}` : undefined);
+}
+
 function internalRequest(request: Request, env: Env, path: string): Request {
   const headers = new Headers(request.headers);
   headers.set('Authorization', `Bearer ${env.REGISTRY_INTERNAL_TOKEN ?? ''}`);
   const url = new URL(request.url);
   url.hostname = 'registry';
   url.pathname = path;
-  url.search = '';
   return new Request(url, {
     method: request.method,
     headers,
@@ -43,7 +47,7 @@ export default {
     }
 
     if (url.pathname === '/registry/rotate' && request.method === 'POST') {
-      if (!safeTokenEqual(request.headers.get('Authorization'), env.OPERATOR_ADMIN_TOKEN ? `Bearer ${env.OPERATOR_ADMIN_TOKEN}` : undefined)) {
+      if (!isOperatorAuthorized(request, env)) {
         return Response.json({ error: 'Unauthorized operator rotation attempt' }, { status: 401 });
       }
       if (!env.REGISTRY_INTERNAL_TOKEN) {
@@ -53,13 +57,16 @@ export default {
       return env.NODE_REGISTRY.get(id).fetch(internalRequest(request, env, '/registry/rotate'));
     }
 
-    const metadataMatch = url.pathname.match(/^\/registry\/nodes\/([a-zA-Z0-9._:-]{1,128})$/);
-    if (metadataMatch && request.method === 'GET') {
+    // Administrative listing and per-node metadata are both operator-only.
+    if ((url.pathname === '/registry/nodes' || /^\/registry\/nodes\/[^/]+$/.test(url.pathname)) && request.method === 'GET') {
+      if (!isOperatorAuthorized(request, env)) {
+        return Response.json({ error: 'Unauthorized administrative access' }, { status: 401 });
+      }
       if (!env.REGISTRY_INTERNAL_TOKEN) {
         return Response.json({ error: 'Registry internal authentication is not configured' }, { status: 503 });
       }
       const id = env.NODE_REGISTRY.idFromName('global-node-registry');
-      const path = `/registry/nodes/${encodeURIComponent(metadataMatch[1])}`;
+      const path = `${url.pathname}${url.search}`;
       return env.NODE_REGISTRY.get(id).fetch(internalRequest(request, env, path));
     }
 

@@ -18,6 +18,7 @@ interface RegistryStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   transaction<T>(closure: (txn: RegistryStorage) => Promise<T>): Promise<T>;
+  list<T>(options?: { prefix?: string; limit?: number; cursor?: string }): Promise<Map<string, T> & { list_complete?: boolean; cursor?: string }>;
 }
 
 interface RegistryState {
@@ -67,6 +68,12 @@ function metadataFor(state: NodeSecretState): NodeMetadata {
   };
 }
 
+function isInternalRequest(request: Request, env: RegistryEnv): boolean {
+  const authorization = request.headers.get('Authorization');
+  const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : null;
+  return safeTokenEqual(token, env.REGISTRY_INTERNAL_TOKEN);
+}
+
 export class NodeRegistryDO {
   constructor(
     private readonly state: RegistryState,
@@ -76,26 +83,26 @@ export class NodeRegistryDO {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // Internal state is returned only to this Worker, authenticated with a
-    // separate secret. The public Worker router must never forward this path.
+    // Secret-bearing state and all registry administration are internal-only.
+    if (url.pathname.startsWith('/registry/internal/') || url.pathname === '/registry/rotate' || url.pathname === '/registry/nodes' || /^\/registry\/nodes\//.test(url.pathname)) {
+      if (!isInternalRequest(request, this.env)) return json({ error: 'Unauthorized' }, 401);
+    }
+
     if (request.method === 'GET' && url.pathname.startsWith('/registry/internal/state/')) {
-      if (!safeTokenEqual(request.headers.get('Authorization')?.replace(/^Bearer /, '') ?? null, this.env.REGISTRY_INTERNAL_TOKEN)) {
-        return json({ error: 'Unauthorized' }, 401);
-      }
       const nodeId = decodeURIComponent(url.pathname.slice('/registry/internal/state/'.length));
       return this.getSecretState(nodeId);
     }
 
+    if (request.method === 'GET' && url.pathname === '/registry/nodes') {
+      return this.listAllNodes(url);
+    }
+
     const metadataMatch = url.pathname.match(/^\/registry\/nodes\/([^/]+)$/);
     if (request.method === 'GET' && metadataMatch) {
-      const nodeId = decodeURIComponent(metadataMatch[1]);
-      return this.getNodeMetadata(nodeId);
+      return this.getNodeMetadata(decodeURIComponent(metadataMatch[1]));
     }
 
     if (request.method === 'POST' && url.pathname === '/registry/rotate') {
-      if (!safeTokenEqual(request.headers.get('Authorization')?.replace(/^Bearer /, '') ?? null, this.env.REGISTRY_INTERNAL_TOKEN)) {
-        return json({ error: 'Unauthorized' }, 401);
-      }
       return this.rotateSecret(request);
     }
 
@@ -129,6 +136,27 @@ export class NodeRegistryDO {
       return json(record);
     } catch {
       return json({ error: 'Node registry unavailable' }, 503);
+    }
+  }
+
+  private async listAllNodes(url: URL): Promise<Response> {
+    const rawLimit = Number(url.searchParams.get('limit') ?? '100');
+    const limit = Number.isInteger(rawLimit) ? Math.min(Math.max(rawLimit, 1), 100) : 100;
+    const cursor = url.searchParams.get('cursor') ?? undefined;
+
+    try {
+      const entries = await this.state.storage.list<NodeSecretState>({ prefix: 'node:', limit, cursor });
+      const nodes: NodeMetadata[] = [];
+      for (const [, record] of entries) {
+        // Never serialize the stored record: it contains current and possibly
+        // next secrets. Project only the explicitly public metadata fields.
+        if (!record || typeof record.nodeId !== 'string' || !Number.isSafeInteger(record.currentVersion)) continue;
+        nodes.push(metadataFor(record));
+      }
+      const complete = entries.list_complete ?? entries.size < limit;
+      return json({ nodes, total: nodes.length, complete, cursor: complete ? undefined : entries.cursor });
+    } catch {
+      return json({ error: 'Unable to list registry nodes' }, 500);
     }
   }
 
@@ -175,15 +203,10 @@ export class NodeRegistryDO {
         let existing = await txn.get<NodeSecretState>(storageKey);
 
         // Permit rotation to initialize only the configured legacy node, using
-        // the explicitly configured legacy secret. Missing/weak secrets fail
-        // closed; there is deliberately no built-in fallback credential.
+        // the explicitly configured legacy secret. Missing/weak secrets fail closed.
         const defaultNodeId = this.env.DEFAULT_NODE_ID ?? 'node-default';
         if (!existing && nodeId === defaultNodeId && isValidSecret(this.env.QAL_SECRET)) {
-          existing = {
-            nodeId,
-            currentSecret: this.env.QAL_SECRET,
-            currentVersion: 1,
-          };
+          existing = { nodeId, currentSecret: this.env.QAL_SECRET, currentVersion: 1 };
         }
         if (!existing) return { error: 'Node not found', status: 404 as const };
 
