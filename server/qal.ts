@@ -26,3 +26,39 @@ export async function verifyHmacSignature(
     return false;
   }
 }
+
+/**
+ * Build the canonical QAL message. Signers must use the exact same format:
+ * nodeId:timestamp:METHOD:path-and-query:sha256(body)
+ *
+ * The URL path and query are included so a signature cannot be moved to a
+ * different endpoint or query. The body hash binds the signature to the exact
+ * request bytes (including an empty body).
+ */
+export async function createQALCanonicalMessage(
+  request: Request,
+  nodeId: string,
+  timestamp: string,
+): Promise<string> {
+  const body = await request.clone().arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', body);
+  const bodyHash = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  const url = new URL(request.url);
+  const pathAndQuery = `${url.pathname}${url.search}`;
+
+  return `${nodeId}:${timestamp}:${request.method.toUpperCase()}:${pathAndQuery}:${bodyHash}`;
+}
+
+/** Verify a request whose HMAC covers its node, timestamp, method, path/query, and body. */
+export async function verifyQALRequestSignature(
+  secret: string,
+  request: Request,
+  nodeId: string,
+  timestamp: string,
+  signatureHex: string,
+): Promise<boolean> {
+  const canonicalMessage = await createQALCanonicalMessage(request, nodeId, timestamp);
+  return verifyHmacSignature(secret, canonicalMessage, signatureHex);
+}

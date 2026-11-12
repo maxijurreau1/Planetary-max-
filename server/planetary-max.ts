@@ -1,6 +1,6 @@
 import { Hono, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
-import { verifyHmacSignature } from './qal';
+import { verifyQALRequestSignature } from './qal';
 
 type Bindings = {
   DB: D1Database;
@@ -58,9 +58,10 @@ const requireQALAuth: MiddlewareHandler<{ Bindings: Bindings; Variables: Variabl
     return c.json({ success: false, error: 'QAL_AUTH_FAILED: Node is not registered' }, 403);
   }
 
-  const valid = await verifyHmacSignature(secret, `${nodeId}:${timestamp}`, signature);
+  // Bind authentication to this exact HTTP method, path/query, and request body.
+  const valid = await verifyQALRequestSignature(secret, c.req.raw, nodeId, timestamp, signature);
   if (!valid) {
-    return c.json({ success: false, error: 'QAL_AUTH_FAILED: Invalid cryptographic signature' }, 403);
+    return c.json({ success: false, error: 'QAL_AUTH_FAILED: Invalid request signature' }, 403);
   }
 
   await c.env.DB.prepare(
