@@ -1,4 +1,4 @@
-import type { NodeRegistryNamespace } from './verifier';
+import { checkUserNodeAuthorization, verifyRealUserSession } from './secureAuth';
 
 export interface UpgradeTicket {
   token: string;
@@ -32,8 +32,9 @@ interface SecureState {
 }
 
 interface SecureEnv {
-  // Add real identity/ACL bindings here when integrating the authentication system.
-  [key: string]: unknown;
+  DB: D1Database;
+  SESSION_KV: KVNamespace;
+  JWT_SECRET: string;
 }
 
 interface SocketAttachment {
@@ -48,7 +49,6 @@ const TICKET_TTL_MS = 60_000;
 const SOCKET_TTL_MS = 15 * 60_000;
 const NONCE_TTL_MS = 5 * 60_000;
 
-// Cloudflare Workers provides this runtime global for WebSocket upgrades.
 declare const WebSocketPair: new () => { 0: WebSocket; 1: WebSocket };
 
 function json(body: unknown, status = 200): Response {
@@ -89,7 +89,7 @@ export class BEEMAXSecureNodeRegistryDO {
   }
 
   private async issueUpgradeTicket(request: Request): Promise<Response> {
-    const userAuth = await this.verifyRealUserSession(request);
+    const userAuth = await verifyRealUserSession(request, this.env);
     if (!userAuth.authorized || !userAuth.userId) {
       return json({ error: 'Unauthorized: valid user session required' }, 401);
     }
@@ -98,7 +98,9 @@ export class BEEMAXSecureNodeRegistryDO {
     try {
       const contentLength = Number(request.headers.get('Content-Length') ?? '0');
       if (contentLength > 4096) return json({ error: 'Request body too large' }, 413);
-      body = await request.json();
+      const rawBody = await request.text();
+      if (new TextEncoder().encode(rawBody).byteLength > 4096) return json({ error: 'Request body too large' }, 413);
+      body = JSON.parse(rawBody);
     } catch {
       return json({ error: 'Invalid JSON' }, 400);
     }
@@ -107,7 +109,7 @@ export class BEEMAXSecureNodeRegistryDO {
     if (typeof nodeId !== 'string' || !NODE_ID_PATTERN.test(nodeId)) {
       return json({ error: 'Invalid nodeId' }, 400);
     }
-    if (!(await this.checkUserNodeAuthorization(userAuth.userId, nodeId))) {
+    if (!(await checkUserNodeAuthorization(this.env.DB, userAuth.userId, nodeId))) {
       return json({ error: 'Forbidden: user is not authorized for this node' }, 403);
     }
 
@@ -155,9 +157,7 @@ export class BEEMAXSecureNodeRegistryDO {
           !NODE_ID_PATTERN.test(stored.nodeId) ||
           !Number.isSafeInteger(stored.expiresAt) || stored.expiresAt <= now ||
           !Number.isSafeInteger(stored.sessionExpiresAt) || stored.sessionExpiresAt <= now
-        ) {
-          return undefined;
-        }
+        ) return undefined;
         await txn.delete(key);
         return stored;
       });
@@ -177,12 +177,11 @@ export class BEEMAXSecureNodeRegistryDO {
   }
 
   async webSocketMessage(socket: SecureSocket, message: string | ArrayBuffer): Promise<void> {
-    let attachment: SocketAttachment | null = null;
     try {
       const value: unknown = socket.deserializeAttachment();
-      if (isRecord(value) && typeof value.nodeId === 'string' && Number.isSafeInteger(value.sessionExpiresAt)) {
-        attachment = value as unknown as SocketAttachment;
-      }
+      const attachment = isRecord(value) && typeof value.nodeId === 'string' && Number.isSafeInteger(value.sessionExpiresAt)
+        ? value as unknown as SocketAttachment
+        : null;
       if (!attachment || attachment.sessionExpiresAt <= Date.now()) {
         socket.send(JSON.stringify({ error: 'Session expired or unauthenticated socket' }));
         socket.close(1008, 'Session expired');
@@ -215,8 +214,6 @@ export class BEEMAXSecureNodeRegistryDO {
         return;
       }
 
-      // Socket upgrade authenticates the connection. Consume per-node nonces
-      // transactionally to reject duplicate frames before any action is handled.
       const nonceKey = `nonce:${attachment.nodeId}:${nonce}`;
       const expiresAt = Date.now() + NONCE_TTL_MS;
       const consumed = await this.state.storage.transaction(async (txn) => {
@@ -229,8 +226,8 @@ export class BEEMAXSecureNodeRegistryDO {
         return;
       }
 
-      // Application event handling must be added here with operation-specific
-      // authorization/idempotency before performing state-changing actions.
+      // Add operation-specific authorization and durable idempotency before
+      // implementing any state-changing event handling.
       socket.send(JSON.stringify({ status: 'acknowledged', type, nodeId: attachment.nodeId }));
     } catch {
       socket.send(JSON.stringify({ error: 'Malformed frame payload' }));
@@ -247,16 +244,6 @@ export class BEEMAXSecureNodeRegistryDO {
       }
     }
     await this.state.storage.setAlarm(Date.now() + 60_000);
-  }
-
-  private async verifyRealUserSession(_request: Request): Promise<{ authorized: boolean; userId?: string }> {
-    // Fail closed until connected to the application's real session store or IdP.
-    return { authorized: false };
-  }
-
-  private async checkUserNodeAuthorization(_userId: string, _nodeId: string): Promise<boolean> {
-    // Fail closed until connected to the application's node ACL/permission store.
-    return false;
   }
 
   private extractCookie(request: Request, name: string): string | null {

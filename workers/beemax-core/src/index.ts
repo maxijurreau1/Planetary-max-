@@ -7,6 +7,9 @@ export { NodeRegistryDO, BEEMAXSecureNodeRegistryDO };
 interface Env {
   NODE_REGISTRY: NodeRegistryNamespace;
   BEEMAX_SECURE_REGISTRY?: NodeRegistryNamespace;
+  DB?: D1Database;
+  SESSION_KV?: KVNamespace;
+  JWT_SECRET?: string;
   OPERATOR_ADMIN_TOKEN?: string;
   REGISTRY_INTERNAL_TOKEN?: string;
   ALLOWED_ORIGIN?: string;
@@ -50,9 +53,12 @@ function validConfiguredOrigin(value: string | undefined): value is string {
   }
 }
 
-function secureRegistryStub(request: Request, env: Env): Response | Promise<Response> {
+function secureRegistryStub(request: Request, env: Env): Promise<Response> {
   if (!env.BEEMAX_SECURE_REGISTRY) {
-    return Response.json({ error: 'Secure WebSocket registry is not configured' }, { status: 503 });
+    return Promise.resolve(Response.json({ error: 'Secure WebSocket registry is not configured' }, { status: 503 }));
+  }
+  if (!env.DB || !env.SESSION_KV || !env.JWT_SECRET) {
+    return Promise.resolve(Response.json({ error: 'Secure session authentication is not configured' }, { status: 503 }));
   }
   const id = env.BEEMAX_SECURE_REGISTRY.idFromName('global-secure-registry');
   return env.BEEMAX_SECURE_REGISTRY.get(id).fetch(request);
@@ -62,9 +68,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === '/health' && request.method === 'GET') {
-      return Response.json({ ok: true });
-    }
+    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });
 
     if (url.pathname === '/api/beemax/session' && request.method === 'POST') {
       if (!validConfiguredOrigin(env.ALLOWED_ORIGIN)) {
@@ -73,41 +77,30 @@ export default {
       if (request.headers.get('Origin') !== env.ALLOWED_ORIGIN) {
         return Response.json({ error: 'Forbidden: invalid or missing origin' }, { status: 403 });
       }
-      return await secureRegistryStub(request, env);
+      return secureRegistryStub(request, env);
     }
 
     if (url.pathname === '/ws') {
-      if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
-        return new Response('Expected Upgrade: websocket', { status: 426 });
-      }
+      if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected Upgrade: websocket', { status: 426 });
       if (!validConfiguredOrigin(env.ALLOWED_ORIGIN)) {
         return Response.json({ error: 'Server configuration error: ALLOWED_ORIGIN is missing or invalid' }, { status: 500 });
       }
       if (request.headers.get('Origin') !== env.ALLOWED_ORIGIN) {
         return Response.json({ error: 'Forbidden: invalid or missing origin' }, { status: 403 });
       }
-      return await secureRegistryStub(request, env);
+      return secureRegistryStub(request, env);
     }
 
     if (url.pathname === '/registry/rotate' && request.method === 'POST') {
-      if (!isOperatorAuthorized(request, env)) {
-        return Response.json({ error: 'Unauthorized operator rotation attempt' }, { status: 401 });
-      }
-      if (!env.REGISTRY_INTERNAL_TOKEN) {
-        return Response.json({ error: 'Registry internal authentication is not configured' }, { status: 503 });
-      }
+      if (!isOperatorAuthorized(request, env)) return Response.json({ error: 'Unauthorized operator rotation attempt' }, { status: 401 });
+      if (!env.REGISTRY_INTERNAL_TOKEN) return Response.json({ error: 'Registry internal authentication is not configured' }, { status: 503 });
       const id = env.NODE_REGISTRY.idFromName('global-node-registry');
       return env.NODE_REGISTRY.get(id).fetch(internalRequest(request, env, '/registry/rotate'));
     }
 
-    // Administrative listing and per-node metadata are both operator-only.
     if ((url.pathname === '/registry/nodes' || /^\/registry\/nodes\/[^/]+$/.test(url.pathname)) && request.method === 'GET') {
-      if (!isOperatorAuthorized(request, env)) {
-        return Response.json({ error: 'Unauthorized administrative access' }, { status: 401 });
-      }
-      if (!env.REGISTRY_INTERNAL_TOKEN) {
-        return Response.json({ error: 'Registry internal authentication is not configured' }, { status: 503 });
-      }
+      if (!isOperatorAuthorized(request, env)) return Response.json({ error: 'Unauthorized administrative access' }, { status: 401 });
+      if (!env.REGISTRY_INTERNAL_TOKEN) return Response.json({ error: 'Registry internal authentication is not configured' }, { status: 503 });
       const id = env.NODE_REGISTRY.idFromName('global-node-registry');
       return env.NODE_REGISTRY.get(id).fetch(internalRequest(request, env, `${url.pathname}${url.search}`));
     }
