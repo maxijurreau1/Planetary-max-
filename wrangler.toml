@@ -10,6 +10,22 @@ binding = "DB"
 database_name = "beemax-production-db"
 database_id = "5a8e3def-a8ef-4fda-907f-20bc5f24a501"
 
+[[durable_objects.bindings]]
+name = "NODE_REGISTRY"
+class_name = "NodeRegistryDO"
+
+[[durable_objects.bindings]]
+name = "BEEMAX_SECURE_REGISTRY"
+class_name = "BEEMAXSecureNodeRegistryDO"
+
+[[migrations]]
+tag = "v1-node-registry"
+new_sqlite_classes = ["NodeRegistryDO"]
+
+[[migrations]]
+tag = "v2-secure-registry"
+new_sqlite_classes = ["BEEMAXSecureNodeRegistryDO"]
+
 [assets]
 directory = "./dist"
 binding = "ASSETS"
