@@ -1,0 +1,11 @@
+name = "beemax-core"
+main = "src/index.ts"
+compatibility_date = "2026-11-12"
+
+[[durable_objects.bindings]]
+name = "NODE_REGISTRY"
+class_name = "NodeRegistryDO"
+
+[[migrations]]
+tag = "v1-node-registry"
+new_sqlite_classes = ["NodeRegistryDO"]

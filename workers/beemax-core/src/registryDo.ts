@@ -1,0 +1,203 @@
+export interface NodeSecretState {
+  nodeId: string;
+  currentSecret: string;
+  currentVersion: number;
+  nextSecret?: string;
+  nextVersion?: number;
+  nextExpiresAt?: number;
+}
+
+export interface NodeMetadata {
+  nodeId: string;
+  currentVersion: number;
+  nextVersion?: number;
+  nextExpiresAt?: number;
+}
+
+interface RegistryStorage {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+  transaction<T>(closure: (txn: RegistryStorage) => Promise<T>): Promise<T>;
+}
+
+interface RegistryState {
+  storage: RegistryStorage;
+}
+
+interface RegistryEnv {
+  REGISTRY_INTERNAL_TOKEN?: string;
+}
+
+const json = (body: unknown, status = 200): Response => Response.json(body, {
+  status,
+  headers: { 'Cache-Control': 'no-store' },
+});
+
+const NODE_ID_PATTERN = /^[a-zA-Z0-9._:-]{1,128}$/;
+const MIN_SECRET_BYTES = 32;
+const MAX_SECRET_BYTES = 512;
+const MIN_GRACE_PERIOD_MS = 60_000;
+const MAX_GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
+
+function isValidSecret(secret: unknown): secret is string {
+  if (typeof secret !== 'string') return false;
+  const length = new TextEncoder().encode(secret).byteLength;
+  return length >= MIN_SECRET_BYTES && length <= MAX_SECRET_BYTES;
+}
+
+function safeTokenEqual(actual: string | null, expected: string | undefined): boolean {
+  if (!actual || !expected) return false;
+  const encoder = new TextEncoder();
+  const a = encoder.encode(actual);
+  const b = encoder.encode(expected);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+function metadataFor(state: NodeSecretState): NodeMetadata {
+  return {
+    nodeId: state.nodeId,
+    currentVersion: state.currentVersion,
+    nextVersion: state.nextVersion,
+    nextExpiresAt: state.nextExpiresAt,
+  };
+}
+
+export class NodeRegistryDO {
+  constructor(
+    private readonly state: RegistryState,
+    private readonly env: RegistryEnv,
+  ) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Internal state is returned only to this Worker, authenticated with a
+    // separate secret. The public Worker router must never forward this path.
+    if (request.method === 'GET' && url.pathname.startsWith('/registry/internal/state/')) {
+      if (!safeTokenEqual(request.headers.get('Authorization')?.replace(/^Bearer /, '') ?? null, this.env.REGISTRY_INTERNAL_TOKEN)) {
+        return json({ error: 'Unauthorized' }, 401);
+      }
+      const nodeId = decodeURIComponent(url.pathname.slice('/registry/internal/state/'.length));
+      return this.getSecretState(nodeId);
+    }
+
+    const metadataMatch = url.pathname.match(/^\/registry\/nodes\/([^/]+)$/);
+    if (request.method === 'GET' && metadataMatch) {
+      const nodeId = decodeURIComponent(metadataMatch[1]);
+      return this.getNodeMetadata(nodeId);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/registry/rotate') {
+      if (!safeTokenEqual(request.headers.get('Authorization')?.replace(/^Bearer /, '') ?? null, this.env.REGISTRY_INTERNAL_TOKEN)) {
+        return json({ error: 'Unauthorized' }, 401);
+      }
+      return this.rotateSecret(request);
+    }
+
+    return json({ error: 'Not found' }, 404);
+  }
+
+  private async getSecretState(nodeId: string): Promise<Response> {
+    if (!NODE_ID_PATTERN.test(nodeId)) return json({ error: 'Invalid node ID' }, 400);
+    const record = await this.state.storage.get<NodeSecretState>(`node:${nodeId}`);
+    if (!record) return json({ error: 'Node not found' }, 404);
+    return json(record);
+  }
+
+  private async getNodeMetadata(nodeId: string): Promise<Response> {
+    if (!NODE_ID_PATTERN.test(nodeId)) return json({ error: 'Invalid node ID' }, 400);
+    const record = await this.state.storage.get<NodeSecretState>(`node:${nodeId}`);
+    if (!record) return json({ error: 'Node not found' }, 404);
+    return json(metadataFor(record));
+  }
+
+  private async rotateSecret(request: Request): Promise<Response> {
+    let input: {
+      nodeId?: unknown;
+      newSecret?: unknown;
+      expectedVersion?: unknown;
+      gracePeriodMs?: unknown;
+    };
+
+    try {
+      input = await request.json();
+    } catch {
+      return json({ error: 'Invalid JSON' }, 400);
+    }
+
+    const { nodeId, newSecret, expectedVersion } = input;
+    const gracePeriodMs = input.gracePeriodMs ?? 24 * 60 * 60 * 1000;
+
+    if (typeof nodeId !== 'string' || !NODE_ID_PATTERN.test(nodeId)) {
+      return json({ error: 'Invalid nodeId' }, 400);
+    }
+    if (!isValidSecret(newSecret)) {
+      return json({ error: 'newSecret must contain 32 to 512 UTF-8 bytes' }, 400);
+    }
+    if (!Number.isSafeInteger(expectedVersion) || (expectedVersion as number) < 1) {
+      return json({ error: 'expectedVersion must be a positive integer' }, 400);
+    }
+    if (!Number.isSafeInteger(gracePeriodMs) || (gracePeriodMs as number) < MIN_GRACE_PERIOD_MS || (gracePeriodMs as number) > MAX_GRACE_PERIOD_MS) {
+      return json({ error: 'gracePeriodMs must be between 60 seconds and 30 days' }, 400);
+    }
+
+    try {
+      const result = await this.state.storage.transaction(async (txn) => {
+        const storageKey = `node:${nodeId}`;
+        const existing = await txn.get<NodeSecretState>(storageKey);
+        if (!existing) return { error: 'Node not found', status: 404 as const };
+
+        if (existing.nodeId !== nodeId || !isValidSecret(existing.currentSecret) || !Number.isSafeInteger(existing.currentVersion)) {
+          return { error: 'Stored node secret state is invalid', status: 500 as const };
+        }
+        if (existing.currentVersion !== expectedVersion) {
+          return { error: `Version conflict: expected ${expectedVersion}, found ${existing.currentVersion}`, status: 409 as const };
+        }
+
+        const now = Date.now();
+        const pendingIsValid = Boolean(
+          existing.nextSecret &&
+          Number.isSafeInteger(existing.nextVersion) &&
+          Number.isSafeInteger(existing.nextExpiresAt) &&
+          now < (existing.nextExpiresAt as number),
+        );
+        if (pendingIsValid) {
+          return { error: 'Existing nextSecret is still valid and unexpired. Promote or wait for expiration.', status: 409 as const };
+        }
+
+        let currentSecret = existing.currentSecret;
+        let currentVersion = existing.currentVersion;
+        if (existing.nextSecret && existing.nextExpiresAt !== undefined && now >= existing.nextExpiresAt) {
+          if (!isValidSecret(existing.nextSecret) || !Number.isSafeInteger(existing.nextVersion)) {
+            return { error: 'Stored pending secret state is invalid', status: 500 as const };
+          }
+          currentSecret = existing.nextSecret;
+          currentVersion = existing.nextVersion as number;
+        }
+
+        if (newSecret === currentSecret) {
+          return { error: 'newSecret must differ from the active secret', status: 400 as const };
+        }
+
+        const updated: NodeSecretState = {
+          nodeId,
+          currentSecret,
+          currentVersion,
+          nextSecret: newSecret,
+          nextVersion: currentVersion + 1,
+          nextExpiresAt: now + (gracePeriodMs as number),
+        };
+        await txn.put(storageKey, updated);
+        return { metadata: metadataFor(updated) };
+      });
+
+      if ('error' in result) return json({ error: result.error }, result.status);
+      return json({ success: true, ...result.metadata }, 200);
+    } catch {
+      return json({ error: 'Secret rotation failed' }, 500);
+    }
+  }
+}
