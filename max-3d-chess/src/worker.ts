@@ -9,11 +9,13 @@ interface WorkerEnv extends Env {
 
 const app = new Hono<{ Bindings: WorkerEnv }>();
 
-app.get('/api/chess/health', c => c.json({
-  system: 'MAX 3D Chess',
-  status: 'ACTIVE',
-  escrow: 'DISABLED',
+app.get('/api/chess/status', c => c.json({
+  status: 'ONLINE',
+  engine: 'MAX-3D-CHESS',
+  matchState: 'AVAILABLE',
   authentication: 'NOT_CONFIGURED',
+  wagering: 'DISABLED',
+  escrow: 'DISABLED',
 }));
 
 app.post('/api/chess/match/create', async c => {
@@ -33,15 +35,16 @@ app.all('/api/chess/match/:id/*', async c => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(matchId)) {
     return c.json({ error: 'Invalid match id.' }, 400);
   }
-  const path = new URL(c.req.url).pathname;
+  const requestUrl = new URL(c.req.url);
   const prefix = `/api/chess/match/${matchId}`;
-  const targetPath = path.slice(prefix.length) || '/state';
+  const targetPath = requestUrl.pathname.slice(prefix.length) || '/state';
   const room = c.env.MATCH_ROOM.get(c.env.MATCH_ROOM.idFromName(matchId));
   const target = new URL(`https://match${targetPath}`);
-  target.search = new URL(c.req.url).search;
+  target.search = requestUrl.search;
   return room.fetch(new Request(target, c.req.raw));
 });
 
+// Keep the existing Planetary-Max showroom assets available from this Worker.
 app.all('*', c => c.env.ASSETS.fetch(c.req.raw));
 
 export default app;
