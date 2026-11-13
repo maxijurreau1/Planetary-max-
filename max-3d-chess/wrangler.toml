@@ -1,6 +1,10 @@
-name = "max-3d-chess"
-main = "src/index.ts"
-compatibility_date = "2026-11-12"
+name = "planetary-max-sovereign"
+main = "src/worker.ts"
+compatibility_date = "2026-03-01"
+
+[assets]
+directory = "../dist"
+binding = "ASSETS"
 
 [[durable_objects.bindings]]
 name = "MATCH_ROOM"
@@ -12,6 +16,6 @@ new_sqlite_classes = ["MatchRoom"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "max-3d-chess"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_name = "max-empire-db"
+database_id = "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID"
 migrations_dir = "."
