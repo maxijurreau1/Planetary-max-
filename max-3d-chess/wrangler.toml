@@ -1,0 +1,17 @@
+name = "max-3d-chess"
+main = "src/index.ts"
+compatibility_date = "2026-11-12"
+
+[[durable_objects.bindings]]
+name = "MATCH_ROOM"
+class_name = "MatchRoom"
+
+[[migrations]]
+tag = "v1-match-room"
+new_sqlite_classes = ["MatchRoom"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "max-3d-chess"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "."
