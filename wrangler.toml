@@ -1,36 +1,31 @@
-name = "planetary-max"
-main = "server/planetary-max.ts"
-compatibility_date = "2026-11-10"
+#:schema node_modules/wrangler/config-schema.json
+name = "beemax-portal-os1"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ENVIRONMENT = "production"
+PROTOCOL_VERSION = "DAT-JURREAUISM-v1"
+PRE_TIER_INDEX = "IDX-PRETIER-001"
+ISOLATE_MEMORY_LIMIT_MB = "128"
 
+# ----------------------------------------------------------------------------
+# 1. DURABLE OBJECTS COGNITIVE MESH (SQLite-Backed ICV Actors)
+# ----------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "BEEMAX_MESH_STATE"
+class_name = "CognitiveNodeActor"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CognitiveNodeActor"]
+
+# ----------------------------------------------------------------------------
+# 2. UNIFIED CLOUDFLARE D1 DATABASE (Microkernel Logs + Sovereign Marketplace)
+# ----------------------------------------------------------------------------
 [[d1_databases]]
 binding = "DB"
-database_name = "beemax-production-db"
-database_id = "5a8e3def-a8ef-4fda-907f-20bc5f24a501"
-
-[[kv_namespaces]]
-binding = "SESSION_KV"
-namespace_id = "7e90756b6ea84160b91bcea3a7e4d3c7"
-
-[[durable_objects.bindings]]
-name = "NODE_REGISTRY"
-class_name = "NodeRegistryDO"
-
-[[durable_objects.bindings]]
-name = "BEEMAX_SECURE_REGISTRY"
-class_name = "BEEMAXSecureNodeRegistryDO"
-
-[[migrations]]
-tag = "v1-node-registry"
-new_sqlite_classes = ["NodeRegistryDO"]
-
-[[migrations]]
-tag = "v2-secure-registry"
-new_sqlite_classes = ["BEEMAXSecureNodeRegistryDO"]
-
-[assets]
-directory = "./dist"
-binding = "ASSETS"
-not_found_handling = "single-page-application"
+database_name = "beemax-db"
+database_id = "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID"
+migrations_dir = "src/database"
